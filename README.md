@@ -54,3 +54,28 @@ This runs the production build and deploys with the existing Vercel config.
 
 - Without Supabase env vars, the app shows a setup screen.
 - Current RLS policies in `schema.sql` are open for easy collaboration. For stricter security, add auth and user-specific policies.
+
+## Troubleshooting
+
+If you see this in the app:
+
+- `Could not find the table 'public.workspaces' in the schema cache`
+
+Run these steps in the **same Supabase project** used by `VITE_SUPABASE_URL`:
+
+1. Execute [supabase/schema.sql](supabase/schema.sql) in SQL Editor.
+2. Reload PostgREST schema cache:
+
+```sql
+select pg_notify('pgrst', 'reload schema');
+```
+
+3. Verify tables exist:
+
+```sql
+select to_regclass('public.workspaces');
+select to_regclass('public.workspace_members');
+select to_regclass('public.return_items');
+```
+
+If any query returns `null`, the schema was not fully created in that project.

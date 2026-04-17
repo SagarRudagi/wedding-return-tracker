@@ -132,6 +132,14 @@ function formatStatus(status) {
   return status.replaceAll('_', ' ')
 }
 
+function formatSupabaseError(error, fallbackMessage) {
+  const message = String(error?.message || '').toLowerCase()
+  if (message.includes('schema cache') || message.includes("could not find the table 'public.")) {
+    return 'Database setup is incomplete. Run supabase/schema.sql in your Supabase SQL Editor, then run: select pg_notify(\'pgrst\', \'reload schema\');'
+  }
+  return error?.message || fallbackMessage
+}
+
 function makeWorkspaceCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   let code = ''
@@ -238,7 +246,7 @@ function PhaseTracker({ phase }) {
       await loadWorkspaceData(workspace.id)
       setWorkspaceNotice('Connected. All changes sync for everyone in this workspace.')
     } catch (error) {
-      setWorkspaceNotice(error.message || 'Could not connect workspace code.')
+      setWorkspaceNotice(formatSupabaseError(error, 'Could not connect workspace code.'))
       setSyncStatus('Not connected')
     } finally {
       setIsLoading(false)
@@ -297,7 +305,7 @@ function PhaseTracker({ phase }) {
       await loadWorkspaceData(workspace.id)
       setWorkspaceNotice(`Workspace created. Share code ${workspace.code} with collaborators.`)
     } catch (error) {
-      setWorkspaceNotice(error.message || 'Could not create workspace.')
+      setWorkspaceNotice(formatSupabaseError(error, 'Could not create workspace.'))
       setSyncStatus('Not connected')
     } finally {
       setIsLoading(false)
@@ -410,7 +418,7 @@ function PhaseTracker({ phase }) {
 
       await loadWorkspaceData(workspaceId)
     } catch (error) {
-      setWorkspaceNotice(error.message || 'Unable to save this item.')
+      setWorkspaceNotice(formatSupabaseError(error, 'Unable to save this item.'))
       setSyncStatus('Save failed')
     }
 
@@ -430,7 +438,7 @@ function PhaseTracker({ phase }) {
     if (!workspaceId) return
     const result = await supabase.from('return_items').delete().eq('id', id)
     if (result.error) {
-      setWorkspaceNotice(result.error.message || 'Delete failed.')
+      setWorkspaceNotice(formatSupabaseError(result.error, 'Delete failed.'))
       return
     }
 
@@ -448,7 +456,7 @@ function PhaseTracker({ phase }) {
     const result = await supabase.from('return_items').update({ status: nextStatus }).eq('id', id)
 
     if (result.error) {
-      setWorkspaceNotice(result.error.message || 'Status update failed.')
+      setWorkspaceNotice(formatSupabaseError(result.error, 'Status update failed.'))
       return
     }
 
@@ -464,7 +472,7 @@ function PhaseTracker({ phase }) {
     ])
 
     if (result.error) {
-      setWorkspaceNotice(result.error.message || 'Collaborator could not be added.')
+      setWorkspaceNotice(formatSupabaseError(result.error, 'Collaborator could not be added.'))
       return
     }
 
@@ -480,7 +488,7 @@ function PhaseTracker({ phase }) {
       .in('id', selectedIds)
 
     if (result.error) {
-      setWorkspaceNotice(result.error.message || 'Bulk update failed.')
+      setWorkspaceNotice(formatSupabaseError(result.error, 'Bulk update failed.'))
       return
     }
 
