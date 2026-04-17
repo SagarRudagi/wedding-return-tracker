@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import dayjs from 'dayjs'
+import { supabase, hasSupabaseEnv } from './lib/supabaseClient'
 
-const STORAGE_KEY = 'wedding-return-tracker-v1'
+const LAST_WORKSPACE_KEY = 'wedding-return-workspace-code-v1'
 const STATUS_FLOW = ['ordered', 'delivered', 'in_use', 'return_initiated', 'returned']
 const RETURN_METHODS = ['dropoff', 'pickup', 'mail', 'store']
 const RETAILER_POLICIES = {
@@ -131,11 +132,40 @@ function formatStatus(status) {
   return status.replaceAll('_', ' ')
 }
 
+function makeWorkspaceCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  let code = ''
+  for (let index = 0; index < 8; index += 1) {
+    code += chars[Math.floor(Math.random() * chars.length)]
+  }
+  return code
+}
+
+function normalizeWorkspaceCode(value) {
+  return value.trim().toUpperCase()
+}
+
+function mapItemFromDb(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    category: row.category,
+    retailer: row.retailer,
+    purchaseDate: row.purchase_date,
+    deliveryDate: row.delivery_date,
+    returnDeadline: row.return_deadline,
+    price: row.price,
+    orderNumber: row.order_number || '',
+    purchaseUrl: row.purchase_url || '',
+    returnMethod: row.return_method,
+    status: row.status,
+    notes: row.notes || '',
+    receiptUrl: row.receipt_url || '',
+  }
+}
+
 function PhaseTracker({ phase }) {
-  const [items, setItems] = useState(() => {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    return saved ? JSON.parse(saved) : STARTER_ITEMS
-  })
+  const [items, setItems] = useState([])
   const [form, setForm] = useState(createDefaultForm())
   const [editId, setEditId] = useState('')
   const [filters, setFilters] = useState({ retailer: 'all', category: 'all', status: 'all' })
@@ -149,10 +179,162 @@ function PhaseTracker({ phase }) {
   const [newMember, setNewMember] = useState({ name: '', role: 'contributor' })
   const [scanValue, setScanValue] = useState('')
   const [autoFillStatus, setAutoFillStatus] = useState('')
+  const [workspaceInput, setWorkspaceInput] = useState(() => localStorage.getItem(LAST_WORKSPACE_KEY) || '')
+  const [workspaceCode, setWorkspaceCode] = useState(() => localStorage.getItem(LAST_WORKSPACE_KEY) || '')
+  const [workspaceId, setWorkspaceId] = useState('')
+  const [workspaceName, setWorkspaceName] = useState('Wedding Team')
+  const [syncStatus, setSyncStatus] = useState('Not connected')
+  const [isLoading, setIsLoading] = useState(false)
+  const [workspaceNotice, setWorkspaceNotice] = useState('')
+
+  async function loadWorkspaceData(nextWorkspaceId) {
+    const [itemsResult, membersResult] = await Promise.all([
+      supabase
+        .from('return_items')
+        .select('*')
+        .eq('workspace_id', nextWorkspaceId)
+        .order('return_deadline', { ascending: true }),
+      supabase
+        .from('workspace_members')
+        .select('*')
+        .eq('workspace_id', nextWorkspaceId)
+        .order('created_at', { ascending: true }),
+    ])
+
+    if (itemsResult.error) throw itemsResult.error
+    if (membersResult.error) throw membersResult.error
+
+    setItems(itemsResult.data.map(mapItemFromDb))
+    setMembers(membersResult.data.map((member) => ({ id: member.id, name: member.name, role: member.role })))
+    setSyncStatus(`Synced at ${dayjs().format('h:mm A')}`)
+  }
+
+  async function connectToWorkspaceByCode(code) {
+    const normalized = normalizeWorkspaceCode(code)
+    if (!normalized) {
+      setWorkspaceNotice('Enter a workspace code first.')
+      return
+    }
+
+    setIsLoading(true)
+    setWorkspaceNotice('')
+
+    try {
+      const workspaceResult = await supabase
+        .from('workspaces')
+        .select('id, code, name')
+        .eq('code', normalized)
+        .single()
+
+      if (workspaceResult.error) throw workspaceResult.error
+
+      const workspace = workspaceResult.data
+      setWorkspaceId(workspace.id)
+      setWorkspaceCode(workspace.code)
+      setWorkspaceName(workspace.name)
+      localStorage.setItem(LAST_WORKSPACE_KEY, workspace.code)
+      setWorkspaceInput(workspace.code)
+
+      await loadWorkspaceData(workspace.id)
+      setWorkspaceNotice('Connected. All changes sync for everyone in this workspace.')
+    } catch (error) {
+      setWorkspaceNotice(error.message || 'Could not connect workspace code.')
+      setSyncStatus('Not connected')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  async function createWorkspace() {
+    const nextCode = makeWorkspaceCode()
+    const nextName = `Wedding Team ${dayjs().format('MMM D')}`
+
+    setIsLoading(true)
+    setWorkspaceNotice('')
+
+    try {
+      const workspaceInsert = await supabase
+        .from('workspaces')
+        .insert([{ code: nextCode, name: nextName }])
+        .select('id, code, name')
+        .single()
+
+      if (workspaceInsert.error) throw workspaceInsert.error
+
+      const workspace = workspaceInsert.data
+      const membersInsert = await supabase.from('workspace_members').insert([
+        { workspace_id: workspace.id, name: 'Bride', role: 'admin' },
+        { workspace_id: workspace.id, name: 'Best Friend', role: 'contributor' },
+      ])
+
+      if (membersInsert.error) throw membersInsert.error
+
+      const starterItems = STARTER_ITEMS.map((item) => ({
+        workspace_id: workspace.id,
+        name: item.name,
+        category: item.category,
+        retailer: item.retailer,
+        purchase_date: item.purchaseDate,
+        delivery_date: item.deliveryDate,
+        return_deadline: item.returnDeadline,
+        price: item.price,
+        order_number: item.orderNumber,
+        purchase_url: item.purchaseUrl || '',
+        return_method: item.returnMethod,
+        status: item.status,
+        notes: item.notes,
+        receipt_url: item.receiptUrl,
+      }))
+
+      const itemsInsert = await supabase.from('return_items').insert(starterItems)
+      if (itemsInsert.error) throw itemsInsert.error
+
+      setWorkspaceId(workspace.id)
+      setWorkspaceCode(workspace.code)
+      setWorkspaceName(workspace.name)
+      localStorage.setItem(LAST_WORKSPACE_KEY, workspace.code)
+      setWorkspaceInput(workspace.code)
+      await loadWorkspaceData(workspace.id)
+      setWorkspaceNotice(`Workspace created. Share code ${workspace.code} with collaborators.`)
+    } catch (error) {
+      setWorkspaceNotice(error.message || 'Could not create workspace.')
+      setSyncStatus('Not connected')
+    } finally {
+      setIsLoading(false)
+    }
+  }
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
-  }, [items])
+    if (!hasSupabaseEnv || !workspaceCode) return
+    connectToWorkspaceByCode(workspaceCode)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (!workspaceId) return
+
+    const channel = supabase
+      .channel(`workspace-${workspaceId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'return_items', filter: `workspace_id=eq.${workspaceId}` },
+        () => {
+          loadWorkspaceData(workspaceId).catch(() => setSyncStatus('Sync error. Retrying...'))
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'workspace_members', filter: `workspace_id=eq.${workspaceId}` },
+        () => {
+          loadWorkspaceData(workspaceId).catch(() => setSyncStatus('Sync error. Retrying...'))
+        },
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [workspaceId])
 
   const filteredItems = useMemo(() => {
     let next = [...items]
@@ -195,18 +377,42 @@ function PhaseTracker({ phase }) {
     return { dueSoon, inUse, returned }
   }, [items])
 
-  function upsertItem(e) {
+  async function upsertItem(e) {
     e.preventDefault()
+    if (!workspaceId) return
+
     const payload = {
-      ...form,
-      id: editId || `item-${Date.now()}`,
+      workspace_id: workspaceId,
+      name: form.name,
+      category: form.category,
+      retailer: form.retailer,
+      purchase_date: form.purchaseDate,
+      delivery_date: form.deliveryDate,
+      return_deadline: form.returnDeadline,
       price: Number(form.price || 0),
+      order_number: form.orderNumber,
+      purchase_url: form.purchaseUrl,
+      return_method: form.returnMethod,
+      status: form.status,
+      notes: form.notes,
+      receipt_url: form.receiptUrl,
     }
 
-    setItems((prev) => {
-      if (!editId) return [payload, ...prev]
-      return prev.map((item) => (item.id === editId ? payload : item))
-    })
+    try {
+      setSyncStatus('Saving...')
+      if (!editId) {
+        const result = await supabase.from('return_items').insert([payload])
+        if (result.error) throw result.error
+      } else {
+        const result = await supabase.from('return_items').update(payload).eq('id', editId)
+        if (result.error) throw result.error
+      }
+
+      await loadWorkspaceData(workspaceId)
+    } catch (error) {
+      setWorkspaceNotice(error.message || 'Unable to save this item.')
+      setSyncStatus('Save failed')
+    }
 
     setForm(createDefaultForm())
     setEditId('')
@@ -220,35 +426,65 @@ function PhaseTracker({ phase }) {
     })
   }
 
-  function removeItem(id) {
-    setItems((prev) => prev.filter((item) => item.id !== id))
+  async function removeItem(id) {
+    if (!workspaceId) return
+    const result = await supabase.from('return_items').delete().eq('id', id)
+    if (result.error) {
+      setWorkspaceNotice(result.error.message || 'Delete failed.')
+      return
+    }
+
     setSelectedIds((prev) => prev.filter((selected) => selected !== id))
+    await loadWorkspaceData(workspaceId)
   }
 
-  function advanceStatus(id) {
-    setItems((prev) =>
-      prev.map((item) => {
-        if (item.id !== id) return item
-        const current = STATUS_FLOW.indexOf(item.status)
-        const nextStatus = STATUS_FLOW[Math.min(current + 1, STATUS_FLOW.length - 1)]
-        return { ...item, status: nextStatus }
-      }),
-    )
+  async function advanceStatus(id) {
+    if (!workspaceId) return
+    const currentItem = items.find((item) => item.id === id)
+    if (!currentItem) return
+
+    const current = STATUS_FLOW.indexOf(currentItem.status)
+    const nextStatus = STATUS_FLOW[Math.min(current + 1, STATUS_FLOW.length - 1)]
+    const result = await supabase.from('return_items').update({ status: nextStatus }).eq('id', id)
+
+    if (result.error) {
+      setWorkspaceNotice(result.error.message || 'Status update failed.')
+      return
+    }
+
+    await loadWorkspaceData(workspaceId)
   }
 
-  function addMember(e) {
+  async function addMember(e) {
     e.preventDefault()
-    if (!newMember.name.trim()) return
+    if (!workspaceId || !newMember.name.trim()) return
 
-    setMembers((prev) => [...prev, { ...newMember, id: `u-${Date.now()}` }])
+    const result = await supabase.from('workspace_members').insert([
+      { workspace_id: workspaceId, name: newMember.name.trim(), role: newMember.role },
+    ])
+
+    if (result.error) {
+      setWorkspaceNotice(result.error.message || 'Collaborator could not be added.')
+      return
+    }
+
+    await loadWorkspaceData(workspaceId)
     setNewMember({ name: '', role: 'contributor' })
   }
 
-  function applyBulkStatus() {
-    if (!selectedIds.length) return
-    setItems((prev) =>
-      prev.map((item) => (selectedIds.includes(item.id) ? { ...item, status: bulkStatus } : item)),
-    )
+  async function applyBulkStatus() {
+    if (!workspaceId || !selectedIds.length) return
+    const result = await supabase
+      .from('return_items')
+      .update({ status: bulkStatus })
+      .in('id', selectedIds)
+
+    if (result.error) {
+      setWorkspaceNotice(result.error.message || 'Bulk update failed.')
+      return
+    }
+
+    await loadWorkspaceData(workspaceId)
     setSelectedIds([])
   }
 
@@ -325,6 +561,27 @@ function PhaseTracker({ phase }) {
   const retailers = [...new Set(items.map((item) => item.retailer))]
   const categories = [...new Set(items.map((item) => item.category))]
 
+  if (!hasSupabaseEnv) {
+    return (
+      <div className="page">
+        <header className="hero">
+          <div>
+            <p className="eyebrow">Wedding Return Tracker</p>
+            <h1>Connect Supabase to enable multi-user syncing.</h1>
+            <p className="sub">Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to use shared updates.</p>
+          </div>
+        </header>
+        <section className="card">
+          <h2>Setup Required</h2>
+          <p className="muted">
+            This build is now configured for shared workspace data. Add env vars, create the schema from the
+            README, and redeploy.
+          </p>
+        </section>
+      </div>
+    )
+  }
+
   return (
     <div className="page">
       <header className="hero">
@@ -334,9 +591,39 @@ function PhaseTracker({ phase }) {
           <p className="sub">
             Track wedding purchases, protect return windows, and coordinate with your support team.
           </p>
+          <p className="sub">Workspace: {workspaceId ? `${workspaceName} (${workspaceCode})` : 'Not connected'}</p>
+          <p className="helper-text">Sync status: {syncStatus}</p>
         </div>
         <div className="hero-badge">{items.length} items tracked</div>
       </header>
+
+      <section className="card">
+        <h2>Workspace Connection</h2>
+        <div className="toolbar">
+          <input
+            placeholder="Enter workspace code"
+            value={workspaceInput}
+            onChange={(e) => setWorkspaceInput(normalizeWorkspaceCode(e.target.value))}
+          />
+          <button type="button" onClick={() => connectToWorkspaceByCode(workspaceInput)} disabled={isLoading}>
+            Join Workspace
+          </button>
+          <button type="button" className="btn" onClick={createWorkspace} disabled={isLoading}>
+            Create Workspace
+          </button>
+        </div>
+        {!!workspaceNotice && <p className="hint">{workspaceNotice}</p>}
+      </section>
+
+      {!workspaceId && (
+        <section className="card">
+          <h2>Join or Create First</h2>
+          <p className="muted">You need a workspace connection before items can be loaded or updated.</p>
+        </section>
+      )}
+
+      {workspaceId && (
+        <>
 
       <section className="stats">
         <article className="stat">
@@ -675,6 +962,8 @@ function PhaseTracker({ phase }) {
               </button>
             </div>
           </section>
+        </>
+      )}
         </>
       )}
     </div>

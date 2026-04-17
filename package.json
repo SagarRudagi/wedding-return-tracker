@@ -6,12 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "deploy:prod": "npx vercel@32.6.1 deploy --prod --yes --token \"$VERCEL_TOKEN\"",
+    "deploy:prod": "if [ -n \"$VERCEL_TOKEN\" ]; then npx vercel@32.6.1 deploy --prod --yes --token \"$VERCEL_TOKEN\"; else npx vercel@32.6.1 deploy --prod --yes; fi",
     "release": "npm run build && npm run deploy:prod",
     "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
     "dayjs": "^1.11.20",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
